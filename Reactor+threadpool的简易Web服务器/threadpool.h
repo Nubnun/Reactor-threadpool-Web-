@@ -1,4 +1,8 @@
 #pragma once
+#ifndef THREADPOOL_H
+#define THREADPOOL_H
+
+
 #include<list>
 #include<mutex>
 #include<pthread.h>
@@ -11,7 +15,7 @@ template<class T>
 class threadpool {
 
 public:
-	threadpool(int max_thread, int max_task);
+	threadpool(int max_thread = 8, int max_task = 10000);
 	bool add_task(T* new_task);
 	~threadpool();
 private:
@@ -27,3 +31,5 @@ private:
 	condition_variable_any m_notFull;
 	bool server_stop;
 };
+
+#endif

@@ -1,5 +1,15 @@
 #include "http_connection.h"
-#include <iostream>
+
+
+const char* ok_200_title = "OK";
+const char* error_400_title = "Bad Request";
+const char* error_400_form = "Your retquest has bad syntax ot is inherently impossible to satisfy.\n";
+const char* error_403_title = "forbidden";
+const char* error_403_form = "you do not have permission to get file from this server.\n";
+const char* error_404_title = "Not Fount";
+const char* error_404_form = "The request file was not found on this server.\n";
+const char* error_500_title = "Internal Error";
+const char* error_500_form = "There was an unusual problem serving the request file.\n";
 
 int set_nonblocking(int fd) {
 	int old_option = fcntl(fd, F_GETFL);
@@ -11,7 +21,7 @@ int set_nonblocking(int fd) {
 int http_connection::epoll_fd = -1;
 int http_connection::user_num = 0;
 
-void addfd(int epoll_fd, int fd, int one_shot) {
+void addfd(int epoll_fd, int fd, bool one_shot) {
 	epoll_event event;
 	event.data.fd = fd;
 	event.events = EPOLLIN | EPOLLET | EPOLLHUP;
@@ -33,7 +43,13 @@ void mod_fd(int epoll_fd, int fd, int ev) {
 	epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
 }
 
-http_connection::http_connection(int sockfd, const sockaddr_in address)
+http_connection::http_connection()
+{
+}
+
+
+
+void http_connection::init(int sockfd, const sockaddr_in address)
 {
 	connect_fd = sockfd;
 	m_address = address;
@@ -72,11 +88,6 @@ void http_connection::close_connection()
 		user_num--;
 	}
 	return;
-}
-
-void http_connection::process()
-{
-
 }
 
 bool http_connection::read()
@@ -125,11 +136,19 @@ bool http_connection::write()
 		}
 		byte_have_send += temp;
 		byte_to_send -= temp;
-		if (byte_to_send == 0) {
-
+		if (byte_to_send <= byte_have_send) {
+			unmap();
+			if (analysy_result.linger) {
+				init();
+				mod_fd(epoll_fd, connect_fd, EPOLLIN);
+				return true;
+			}
+		}
+		else {
+			mod_fd(epoll_fd, connect_fd, EPOLLIN);
+			return false;
 		}
 	}
-	return true;
 }
 
 HTTP_REPLY_CODE http_connection::process_read()
@@ -170,10 +189,6 @@ HTTP_REPLY_CODE http_connection::process_read()
 	return NO_REQUEST;
 }
 
-bool http_connection::process_write()
-{
-	
-}
 
 HTTP_REPLY_CODE http_connection::parse_requestline(char* text)
 {
@@ -291,9 +306,144 @@ HTTP_REPLY_CODE http_connection::do_request()
 	int fd = open(analysy_result.file_path, O_RDONLY);
 	file_address = (char*)mmap(0, file_stat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	close(fd);
-	return FILE_REQUEST;
+	return GET_REQUEST;
 }
 
 void http_connection::unmap()
 {
+	if (file_address) {
+		munmap(file_address, file_stat.st_size);
+		file_address = 0;
+	}
+}
+
+//主要逻辑是根据解析请求报文的结果，来选择相应的回复报文。
+bool http_connection::process_write(HTTP_REPLY_CODE ret)
+{
+	switch (ret)
+	{
+	case GET_REQUEST:
+	{
+		add_status_line(200, ok_200_title);
+		if (file_stat.st_size != 0) {
+			add_headers(file_stat.st_size);
+			iv[0].iov_base = write_Buffer.buf;
+			iv[0].iov_len = write_Buffer.write_index;
+			iv[1].iov_base = file_address;
+			iv[1].iov_len = file_stat.st_size;
+			iv_num = 2;
+			return true;
+		}
+		else {
+			const char* ok_200_string = "<html><body></body></html>";
+			add_headers(strlen(ok_200_string));
+			if (!add_content(ok_200_string))
+				return false;
+			return true;
+		}
+		break;
+	}
+	case BAD_REQUEST:
+	{
+		add_status_line(400, error_400_title);
+		add_headers(strlen(error_400_title));
+		if (!add_content(error_400_form))
+			return false;
+		break;
+	}
+	case NO_RESOURESE:
+	{
+		add_status_line(404, error_404_title);
+		add_headers(strlen(error_404_form));
+		if (!add_content(error_404_form))
+			return false;
+		break;
+	}
+	case FORBIDDEN_REQUEST:
+	{
+		add_status_line(403, error_403_title);
+		add_headers(strlen(error_403_form));
+		if (!add_content(error_403_form))
+			return false;
+		break;
+	}
+	case INTERNAL_ERRO:
+	{
+		add_status_line(500, error_500_title);
+		add_headers(strlen(error_500_form));
+		if (!add_content(error_500_form))
+			return false;
+		break;
+	}
+	default:
+		return false;
+	}
+	iv[0].iov_base = write_Buffer.buf;
+	iv[0].iov_len = write_Buffer.write_index;
+	iv_num = 1;
+	return true;
+}
+
+//将回复报文的内容写到用户写缓冲区；
+bool http_connection::add_response(const char* format, ...)
+{
+	if (write_Buffer.write_index >= MAX_WRITE_BUFFER)
+		return false;
+	va_list arg_list;
+	va_start(arg_list, format);
+	int len = vsnprintf(write_Buffer.buf + write_Buffer.write_index, MAX_WRITE_BUFFER - 1 - write_Buffer.write_index, format, arg_list);
+	if (len > MAX_WRITE_BUFFER - 1 - write_Buffer.write_index)
+		return false;
+	write_Buffer.write_index += len;
+	va_end(arg_list);
+	return true;
+}
+//回复报文内容
+bool http_connection::add_content(const char* content)
+{
+	return add_response("%s", content);
+}
+//状态行
+bool http_connection::add_status_line(int status, const char* title)
+{
+	return add_response("%s%d%s\r\n", "HTTP/1.1", status, title);
+}
+
+//依次添加状态行、回复报文首部、回复报文内容
+bool http_connection::add_headers(int content_length)
+{
+	add_content_length(content_length);
+	add_linger();
+	add_blank_line();
+}
+
+bool http_connection::add_content_length(int content_length)
+{
+	return add_response("Content_length: %d\r\n", content_length);
+}
+
+bool http_connection::add_linger()
+{
+	return add_response("Connection: %s\r\n", (analysy_result.linger == true ? "keep_alive" : "close"));
+}
+
+bool http_connection::add_blank_line()
+{
+	return add_response("%s", "\r\n");
+}
+
+//线程池调用的函数，先进行HTTP请求报文的解析，然后将回复报文的内容写到用户的写缓冲区，并向epoll事件表注册可写时间；
+void http_connection::process()
+{
+	HTTP_REPLY_CODE read_res = process_read();
+	//收到的报文不完全，线程直接退出事件处理，并向内核事件表注册可读事件，期待下次收到完整的HTTP请求报文；
+	if (read_res == NO_REQUEST) {
+		mod_fd(epoll_fd, connect_fd, EPOLLIN);
+		return;
+	}
+	bool write_res = process_write(read_res);
+	if (!write_res) {
+		close_connection();
+	}
+	mod_fd(epoll_fd, connect_fd, EPOLLOUT);
 }

@@ -13,7 +13,6 @@ enum CHECK_STATE {
 };
 //服务器可能返回的状态码
 enum HTTP_REPLY_CODE {
-	FILE_REQUEST,//请求资源成功
 	NO_REQUEST,//请求不完整
 	GET_REQUEST,//请求成功
 	BAD_REQUEST,//请求语法错误

@@ -1,7 +1,7 @@
 #include"threadpool.h"
 
 template<class T>
-threadpool<T>::threadpool(int max_thread = 8, int max_task = 10000)
+threadpool<T>::threadpool(int max_thread, int max_task)
 {
 	this->max_thread = max_thread;
 	this->max_task = max_task;
@@ -33,7 +33,7 @@ bool threadpool<T>::add_task(T* new_task)
 	}
 	task_q.push_back(new_task);
 	m_notEmpty.notify_one();
-	return ture;
+	return true;
 }
 
 template<class T>
@@ -51,7 +51,7 @@ void* threadpool<T>::work(void* arg)
 		{
 			lock_guard<mutex> locker(pool->thread_mutex);
 			pool->m_notEmpty.wait(pool->thread_mutex);
-			T* request = task_q.front();
+			T* request = pool->task_q.front();
 			if (request)
 				request.process();
 		}
